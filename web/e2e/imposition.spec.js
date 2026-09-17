@@ -1,9 +1,24 @@
 import { expect, test } from "@playwright/test";
 
-async function submitForm(page, { total, size = "8", flip = "long_edge", special }) {
+async function readDownload(download) {
+  const stream = await download.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+}
+
+async function submitForm(
+  page,
+  { total, size = "8", flip = "long_edge", special, auto = false, segments }
+) {
   await page.getByTestId("input-total-pages").fill(total);
   await page.getByTestId("select-size").selectOption(size);
   await page.getByTestId("select-flip").selectOption(flip);
+  const checkbox = page.getByTestId("checkbox-auto-mode");
+  await checkbox.setChecked(auto);
+  if (segments !== undefined) {
+    await page.getByTestId("input-segments").fill(segments);
+  }
   if (special !== undefined) {
     await page.getByTestId("input-special-pages").fill(special);
   }
@@ -217,5 +232,238 @@ test.describe("骑马订书帖编排页面", () => {
     // 改回合法范围后结果恢复
     await submitForm(page, { total: "8", special: "1,2,7-8" });
     await expect(page.getByTestId("material-plan")).toBeVisible();
+  });
+
+  test.describe("自动混合容量", () => {
+    test("场景一：未勾选自动模式时版面与下载 JSON 保持原结构", async ({
+      page,
+    }) => {
+      await submitForm(page, { total: "24", size: "32" });
+      await expect(page.getByTestId("result-panel")).toBeVisible();
+      await expect(page.getByTestId("auto-plan")).toHaveCount(0);
+      await expect(page.getByTestId("sig-auto")).toHaveCount(0);
+      const cards = page.getByTestId("signature-card");
+      await expect(cards).toHaveCount(1);
+      await expect(cards.first()).toContainText("容量 32");
+      await expect(page.getByTestId("summary-blanks")).toContainText("8 处");
+
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.getByTestId("download-json").click(),
+      ]);
+      const json = await readDownload(download);
+      expect(json.auto_mode).toBeUndefined();
+      expect(json.auto_plan).toBeUndefined();
+    });
+
+    test("场景二：24 页上限 32 同成本候选决胜唯一，选 [16,8]", async ({
+      page,
+    }) => {
+      await submitForm(page, { total: "24", size: "32", auto: true });
+
+      await expect(page.getByTestId("auto-plan")).toBeVisible();
+      await expect(page.getByTestId("auto-capacities")).toContainText(
+        "16、8"
+      );
+      await expect(page.getByTestId("auto-protected")).toContainText("无");
+      await expect(page.getByTestId("summary-signatures")).toContainText(
+        "2 帖"
+      );
+      await expect(page.getByTestId("summary-blanks")).toContainText("0 处");
+
+      const cards = page.getByTestId("signature-card");
+      await expect(cards).toHaveCount(2);
+      await expect(cards.nth(0)).toContainText("规划容量 16");
+      await expect(cards.nth(1)).toContainText("规划容量 8");
+      // 逐帖补白
+      const padding = page.getByTestId("sig-padding");
+      await expect(padding.nth(0)).toContainText("0 处");
+      await expect(padding.nth(1)).toContainText("0 处");
+      // 无约束命中
+      await expect(page.getByTestId("sig-protected-hit")).toHaveCount(0);
+      // 页码唯一、无自检失败
+      await expect(page.locator(".check.bad")).toHaveCount(0);
+
+      // 第二帖为 8 页容量、帖偏移 16：首纸正面 24|17，背面 18|23
+      const secondFirstRow = cards.nth(1).locator("tr[data-sheet='0']");
+      await expect(
+        secondFirstRow.getByTestId("cell-front-left")
+      ).toHaveText("24");
+      await expect(
+        secondFirstRow.getByTestId("cell-front-right")
+      ).toHaveText("17");
+      await expect(
+        secondFirstRow.getByTestId("cell-back-left")
+      ).toHaveText("18");
+      await expect(
+        secondFirstRow.getByTestId("cell-back-right")
+      ).toHaveText("23");
+    });
+
+    test("场景三：受保护页段 16-17 迫使容量次序改为 [8,16]，逐帖显示约束命中", async ({
+      page,
+    }) => {
+      await submitForm(page, {
+        total: "24",
+        size: "32",
+        auto: true,
+        segments: "17-20,16-17",
+      });
+
+      await expect(page.getByTestId("auto-capacities")).toContainText("8、16");
+      // 相邻/重叠项已合并为 16-20
+      await expect(page.getByTestId("auto-protected")).toContainText("16-20");
+
+      const cards = page.getByTestId("signature-card");
+      await expect(cards).toHaveCount(2);
+      await expect(cards.nth(0)).toContainText("规划容量 8");
+      await expect(cards.nth(1)).toContainText("规划容量 16");
+
+      // 第一帖无约束命中，第二帖命中 16-20
+      await expect(cards.nth(0).getByTestId("sig-protected-hit")).toHaveCount(
+        0
+      );
+      const hit = cards.nth(1).getByTestId("sig-protected-hit");
+      await expect(hit).toHaveText("16-20");
+
+      // 第一帖首纸仍为 8|1 / 2|7
+      const firstRow = cards.nth(0).locator("tr[data-sheet='0']");
+      await expect(firstRow.getByTestId("cell-front-left")).toHaveText("8");
+      await expect(firstRow.getByTestId("cell-front-right")).toHaveText("1");
+      await expect(page.locator(".check.bad")).toHaveCount(0);
+
+      // 下载 JSON 与当前画面一致
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.getByTestId("download-json").click(),
+      ]);
+      const json = await readDownload(download);
+      expect(json.auto_plan.capacities).toEqual([8, 16]);
+      expect(json.auto_plan.protected_pages).toEqual([[16, 20]]);
+      expect(json.signatures[1].protected_segments).toEqual([[16, 20]]);
+      expect(json.signatures[0].padding).toBe(0);
+      expect(json.signatures[1].padding).toBe(0);
+    });
+
+    test("受保护段下末帖补白：18 页段 9-17 选 [8,16]，补白 6 且仅在末帖", async ({
+      page,
+    }) => {
+      await submitForm(page, {
+        total: "18",
+        size: "32",
+        auto: true,
+        segments: "9-17",
+      });
+      await expect(page.getByTestId("auto-capacities")).toContainText("8、16");
+      await expect(page.getByTestId("summary-blanks")).toContainText("6 处");
+      const cards = page.getByTestId("signature-card");
+      await expect(cards.nth(1).getByTestId("sig-padding")).toContainText(
+        "6 处"
+      );
+      // 第一帖无空白；空白全部位于最后一帖
+      await expect(
+        cards.nth(0).locator(".blank")
+      ).toHaveCount(0);
+      await expect(cards.nth(1).locator(".blank")).toHaveCount(6);
+      await expect(page.locator(".check.bad")).toHaveCount(0);
+    });
+
+    test("自动模式与材料计划同时生效（同一结果计算冲突）", async ({
+      page,
+    }) => {
+      await submitForm(page, {
+        total: "24",
+        size: "32",
+        auto: true,
+        segments: "16-17",
+        special: "1,17",
+      });
+      await expect(page.getByTestId("auto-capacities")).toContainText("8、16");
+      await expect(page.getByTestId("material-plan")).toBeVisible();
+      // 第一帖首纸 {8,1,2,7}：特种页 1 混纸
+      const firstCard = page.getByTestId("signature-card").nth(0);
+      const mixedRow = firstCard.locator("tr.is-mixed");
+      await expect(mixedRow).toHaveCount(1);
+      await expect(
+        mixedRow.getByTestId("cell-material")
+      ).toHaveText("混纸冲突");
+
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.getByTestId("download-json").click(),
+      ]);
+      const json = await readDownload(download);
+      expect(json.auto_plan.capacities).toEqual([8, 16]);
+      expect(json.material_plan.special_pages).toEqual([1, 17]);
+      expect(json.material_plan.conflicts[0].signature_index).toBe(0);
+    });
+
+    test("场景四：全部候选被约束阻断时返回中文无解原因并清除旧结果", async ({
+      page,
+    }) => {
+      // 先得到一个正常结果
+      await submitForm(page, { total: "24", size: "32", auto: true });
+      await expect(page.getByTestId("result-panel")).toBeVisible();
+
+      // 上限 8、段 5-10 横跨唯一下刀位置 → 无解
+      await submitForm(page, {
+        total: "16",
+        size: "8",
+        auto: true,
+        segments: "5-10",
+      });
+      await expect(page.getByTestId("result-panel")).not.toBeAttached();
+      // 错误提示位于不可拆页段字段下方
+      await expect(page.locator(".field-error").first()).toContainText("无解");
+
+      // 非法格式同样 422 清屏
+      await submitForm(page, {
+        total: "16",
+        size: "8",
+        auto: true,
+        segments: "abc",
+      });
+      await expect(page.getByTestId("result-panel")).not.toBeAttached();
+      await expect(page.locator(".field-error").first()).toContainText("格式");
+
+      // 倒序
+      await submitForm(page, {
+        total: "16",
+        size: "8",
+        auto: true,
+        segments: "10-5",
+      });
+      await expect(page.locator(".field-error").first()).toContainText("倒序");
+
+      // 单段超过容量上限
+      await submitForm(page, {
+        total: "48",
+        size: "16",
+        auto: true,
+        segments: "1-20",
+      });
+      await expect(page.locator(".field-error").first()).toContainText(
+        "超过容量上限"
+      );
+    });
+
+    test("关闭自动模式后恢复固定每帖页数，结果随之刷新", async ({
+      page,
+    }) => {
+      await submitForm(page, { total: "24", size: "32", auto: true });
+      await expect(page.getByTestId("auto-capacities")).toContainText("16、8");
+
+      // 取消勾选即清除旧版面
+      await page.getByTestId("checkbox-auto-mode").setChecked(false);
+      await expect(page.getByTestId("result-panel")).not.toBeAttached();
+      await expect(page.getByTestId("input-segments")).not.toBeAttached();
+
+      // 重新提交走固定模式
+      await page.getByTestId("submit-btn").click();
+      const cards = page.getByTestId("signature-card");
+      await expect(cards).toHaveCount(1);
+      await expect(cards.first()).toContainText("容量 32");
+      await expect(page.getByTestId("auto-plan")).toHaveCount(0);
+    });
   });
 });

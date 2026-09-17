@@ -11,8 +11,14 @@
    - 短边翻转时交换背面左右页位。
 
 3. 帖内位置加上此前书帖的容量偏移即得正文页码；超过正文总页数的位置为空白。
+
+自动混合容量模式（``auto_mode``）：以当前每帖页数为容量上限，在
+{8,16,32} 中取不超过上限的容量作为候选；按正文顺序连续装入各帖，
+书帖边界不得落在任何不可拆页段内部。方案按（补白数、书帖数、
+容量序列从前向后较大者优先）唯一定序。
 """
 
+from bisect import bisect_right
 from typing import Any
 
 LONG_EDGE = "long_edge"
@@ -97,72 +103,222 @@ def _apply_material_plan(
     }
 
 
+def merge_intervals(
+    intervals: list[tuple[int, int]] | list[list[int]],
+) -> list[tuple[int, int]]:
+    """合并重叠或相邻（首尾相接）的闭区间，返回升序 ``(起点, 终点)`` 列表。"""
+    if not intervals:
+        return []
+    ordered = sorted((int(a), int(b)) for a, b in intervals)
+    merged: list[tuple[int, int]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def plan_auto_capacities(
+    total_pages: int,
+    max_capacity: int,
+    protected_intervals: list[tuple[int, int]] | list[list[int]]
+    | None = None,
+) -> list[int] | None:
+    """自动混合容量规划：返回逐帖容量；约束下无解时返回 ``None``。
+
+    候选容量为 {8,16,32} 中不超过 ``max_capacity`` 者。各帖按正文顺序
+    连续装入，除末帖外必须恰好装满某个候选容量，末帖可较短并补白至所选
+    容量；任何书帖边界都不能落在不可拆页段内部。
+
+    方案按（补白总数最少、书帖数最少、容量序列从前向后较大者优先）
+    定序，因此结果唯一。
+    """
+    candidates = tuple(
+        size for size in ALLOWED_SIGNATURE_SIZES if size <= max_capacity
+    )
+    segments = merge_intervals(protected_intervals or [])
+    segment_starts = [a for a, _ in segments]
+
+    def boundary_forbidden(position: int) -> bool:
+        """书帖边界（位于第 position 页与第 position+1 页之间）是否落在页段内部。
+
+        页段 [a,b] 覆盖书页 a…b；在其内部下刀的位置为 a ≤ position < b
+        （段首页前的边界在段外、段末页后的边界也在段外）。
+        """
+        if position <= 0 or position >= total_pages:
+            return False
+        index = bisect_right(segment_starts, position) - 1
+        if index < 0:
+            return False
+        _, end = segments[index]
+        return position < end
+
+    # best[p]：到达边界位置 p 的最优“完整书帖前缀”——书帖数最少，
+    # 同数时容量序列字典序更大（从前向后较大者优先）。
+    best: dict[int, tuple[int, tuple[int, ...]]] = {0: (0, ())}
+    for position in range(total_pages):
+        current = best.get(position)
+        if current is None:
+            continue
+        steps, sequence = current
+        for capacity in candidates:
+            landing = position + capacity
+            if landing >= total_pages:
+                continue
+            if boundary_forbidden(landing):
+                continue
+            candidate_state = (steps + 1, sequence + (capacity,))
+            previous = best.get(landing)
+            if previous is None or _prefix_better(candidate_state, previous):
+                best[landing] = candidate_state
+
+    plans: list[tuple[int, int, tuple[int, ...]]] = []
+    for position, (steps, sequence) in best.items():
+        last_content = total_pages - position
+        if not 1 <= last_content <= max_capacity:
+            continue
+        last_capacity = next(
+            capacity for capacity in candidates if capacity >= last_content
+        )
+        padding = last_capacity - last_content
+        plans.append(
+            (padding, steps + 1, sequence + (last_capacity,))
+        )
+
+    if not plans:
+        return None
+    _, _, winner = min(plans, key=lambda plan: _plan_sort_key(plan))
+    return list(winner)
+
+
+def _prefix_better(
+    candidate: tuple[int, tuple[int, ...]],
+    incumbent: tuple[int, tuple[int, ...]],
+) -> bool:
+    """完整书帖前缀的优劣：书帖数更少；同数时容量序列从前向后较大者优先。"""
+    candidate_steps, candidate_sequence = candidate
+    incumbent_steps, incumbent_sequence = incumbent
+    if candidate_steps != incumbent_steps:
+        return candidate_steps < incumbent_steps
+    return candidate_sequence > incumbent_sequence
+
+
+def _plan_sort_key(
+    plan: tuple[int, int, tuple[int, ...]],
+) -> tuple[int, int, tuple[int, ...]]:
+    """全局定序：补白最少、书帖数最少、容量序列从前向后较大者优先。"""
+    padding, signature_count, sequence = plan
+    return padding, signature_count, tuple(-capacity for capacity in sequence)
+
+
+def _build_signature(
+    signature_index: int,
+    offset: int,
+    capacity: int,
+    total_pages: int,
+    flip: str,
+) -> dict[str, Any]:
+    """按给定帖容量与累计偏移生成一帖的全部纸张页位。"""
+    content_pages = min(capacity, total_pages - offset)
+    sheets: list[dict[str, Any]] = []
+
+    for k in range(capacity // 4):
+        front_left_position = capacity - 2 * k
+        front_right_position = 1 + 2 * k
+        back_left_position = 2 + 2 * k
+        back_right_position = capacity - 1 - 2 * k
+        if flip == SHORT_EDGE:
+            back_left_position, back_right_position = (
+                back_right_position,
+                back_left_position,
+            )
+
+        sheets.append(
+            {
+                "index": k,
+                "front": {
+                    "left": _page_or_blank(
+                        front_left_position, offset, total_pages
+                    ),
+                    "right": _page_or_blank(
+                        front_right_position, offset, total_pages
+                    ),
+                },
+                "back": {
+                    "left": _page_or_blank(
+                        back_left_position, offset, total_pages
+                    ),
+                    "right": _page_or_blank(
+                        back_right_position, offset, total_pages
+                    ),
+                },
+            }
+        )
+
+    return {
+        "index": signature_index,
+        "offset": offset,
+        "capacity": capacity,
+        "content_pages": content_pages,
+        "sheets": sheets,
+    }
+
+
 def impose(
     total_pages: int,
     pages_per_signature: int,
     flip: str,
     special_pages: set[int] | None = None,
+    auto_mode: bool = False,
+    protected_segments: list[tuple[int, int]] | list[list[int]] | None = None,
 ) -> dict[str, Any]:
     """生成全部书帖的纸张页位编排结果。
 
-    ``special_pages`` 为 ``None`` 时响应保持原结构；提供（归一化后的页码
-    集合）时为每张纸附加 ``material`` 标记，并在顶层给出 ``material_plan``
-    （归一化页码、换料纸张数、混纸冲突明细）。
+    固定模式（``auto_mode=False``）下响应结构保持不变：每帖容量均为
+    ``pages_per_signature``。``special_pages`` 为 ``None`` 时不附加材料
+    标记；提供（归一化后的页码集合）时为每张纸附加 ``material`` 标记，
+    并在顶层给出 ``material_plan``。
+
+    自动模式（``auto_mode=True``）下 ``pages_per_signature`` 作为容量
+    上限，由 :func:`plan_auto_capacities` 决定逐帖容量，逐帖容量与累计偏移
+    驱动同一套页位公式；另返回 ``auto_plan``，每帖附加补白与约束命中。
     """
-    signature_count = (total_pages + pages_per_signature - 1) // pages_per_signature
+    if not auto_mode:
+        capacities = [pages_per_signature] * (
+            (total_pages + pages_per_signature - 1) // pages_per_signature
+        )
+        segments: list[tuple[int, int]] = []
+    else:
+        planned = plan_auto_capacities(
+            total_pages, pages_per_signature, protected_segments
+        )
+        if planned is None:
+            raise ValueError("自动容量规划在当前不可拆页段约束下无解")
+        capacities = planned
+        segments = merge_intervals(protected_segments or [])
+
     signatures: list[dict[str, Any]] = []
     total_sheets = 0
+    offset = 0
 
-    for signature_index in range(signature_count):
-        offset = signature_index * pages_per_signature
-        content_pages = min(pages_per_signature, total_pages - offset)
-        sheets: list[dict[str, Any]] = []
-
-        for k in range(pages_per_signature // 4):
-            front_left_position = pages_per_signature - 2 * k
-            front_right_position = 1 + 2 * k
-            back_left_position = 2 + 2 * k
-            back_right_position = pages_per_signature - 1 - 2 * k
-            if flip == SHORT_EDGE:
-                back_left_position, back_right_position = (
-                    back_right_position,
-                    back_left_position,
-                )
-
-            sheets.append(
-                {
-                    "index": k,
-                    "front": {
-                        "left": _page_or_blank(
-                            front_left_position, offset, total_pages
-                        ),
-                        "right": _page_or_blank(
-                            front_right_position, offset, total_pages
-                        ),
-                    },
-                    "back": {
-                        "left": _page_or_blank(
-                            back_left_position, offset, total_pages
-                        ),
-                        "right": _page_or_blank(
-                            back_right_position, offset, total_pages
-                        ),
-                    },
-                }
-            )
-
-        signatures.append(
-            {
-                "index": signature_index,
-                "offset": offset,
-                "capacity": pages_per_signature,
-                "content_pages": content_pages,
-                "sheets": sheets,
-            }
+    for signature_index, capacity in enumerate(capacities):
+        signature = _build_signature(
+            signature_index, offset, capacity, total_pages, flip
         )
-        total_sheets += len(sheets)
+        if auto_mode:
+            signature["padding"] = capacity - signature["content_pages"]
+            signature["protected_segments"] = [
+                list(segment)
+                for segment in segments
+                if offset < segment[0] and segment[1] <= offset + capacity
+            ]
+        signatures.append(signature)
+        total_sheets += len(signature["sheets"])
+        offset += capacity
 
-    blank_count = signature_count * pages_per_signature - total_pages
+    blank_count = sum(capacities) - total_pages
 
     result: dict[str, Any] = {
         "total_pages": total_pages,
@@ -170,11 +326,25 @@ def impose(
         "flip": flip,
         "signatures": signatures,
         "summary": {
-            "signature_count": signature_count,
+            "signature_count": len(capacities),
             "sheet_count": total_sheets,
             "blank_count": blank_count,
         },
     }
+
+    if auto_mode:
+        result["auto_mode"] = True
+        result["auto_plan"] = {
+            "max_capacity": pages_per_signature,
+            "candidate_capacities": [
+                size
+                for size in ALLOWED_SIGNATURE_SIZES
+                if size <= pages_per_signature
+            ],
+            "protected_pages": [list(segment) for segment in segments],
+            "capacities": list(capacities),
+            "blank_count": blank_count,
+        }
 
     if special_pages is not None:
         result["material_plan"] = _apply_material_plan(

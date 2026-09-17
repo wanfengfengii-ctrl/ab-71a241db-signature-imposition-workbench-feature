@@ -6,6 +6,8 @@ import {
   auditResult,
   flattenPlacedPages,
   impose,
+  mergeIntervals,
+  planAutoCapacities,
 } from "./imposition.js";
 
 describe("骑马订书帖编排（与 pytest 同一套规则）", () => {
@@ -85,5 +87,110 @@ describe("骑马订书帖编排（与 pytest 同一套规则）", () => {
         );
       }
     }
+  });
+});
+
+describe("自动混合 8/16/32 容量 + 不可拆页段（与 pytest 同一套规则）", () => {
+  it("重叠或相邻闭区间合并为升序页段", () => {
+    expect(
+      mergeIntervals([
+        [17, 20],
+        [16, 17],
+      ])
+    ).toEqual([
+      [16, 20],
+    ]);
+    expect(
+      mergeIntervals([
+        [5, 8],
+        [9, 12],
+        [20, 24],
+      ])
+    ).toEqual([
+      [5, 12],
+      [20, 24],
+    ]);
+    expect(mergeIntervals([])).toEqual([]);
+  });
+
+  it("同成本候选决胜唯一：24 页上限 32，[16,8] 从前向后较大者胜", () => {
+    expect(planAutoCapacities(24, 32, null)).toEqual([16, 8]);
+    expect(planAutoCapacities(40, 32, null)).toEqual([32, 8]);
+    expect(planAutoCapacities(48, 32, null)).toEqual([32,16]);
+  });
+
+  it("补白优先于书帖数：9 页选单帖 16，17 页选 [16,8]", () => {
+    expect(planAutoCapacities(9, 32, null)).toEqual([16]);
+    expect(planAutoCapacities(17, 32, null)).toEqual([16, 8]);
+  });
+
+  it("受保护页段迫使容量次序改变：段 16-17 阻断接缝后 [16,8]→[8,16]", () => {
+    expect(planAutoCapacities(24, 32, [[16, 17]])).toEqual([8, 16]);
+    expect(planAutoCapacities(24, 32, [[9, 17]])).toEqual([8, 16]);
+    // 段末为 16：接缝在段外，不改变方案
+    expect(planAutoCapacities(24, 32, [[9, 16]])).toEqual([16, 8]);
+  });
+
+  it("无解（全部候选被约束阻断）返回 null", () => {
+    expect(planAutoCapacities(16, 8, [[5, 10]])).toBeNull();
+    expect(planAutoCapacities(24, 16, [[7, 17]])).toBeNull();
+  });
+
+  it("自动模式结果：逐帖容量/偏移驱动同一套页位公式，补白与约束命中", () => {
+    const result = impose(24, 32, LONG_EDGE, {
+      autoMode: true,
+      protectedSegments: [[9, 17]],
+    });
+    expect(result.auto_plan.capacities).toEqual([8, 16]);
+    expect(result.signatures[0].offset).toBe(0);
+    expect(result.signatures[1].offset).toBe(8);
+    expect(result.signatures[0].padding).toBe(0);
+    expect(result.signatures[1].padding).toBe(0);
+    expect(result.signatures[0].protected_segments).toEqual([]);
+    expect(result.signatures[1].protected_segments).toEqual([[9, 17]]);
+    expect(result.summary.blank_count).toBe(0);
+    expect(auditResult(result).everyPageOnce).toBe(true);
+  });
+
+  it("末帖补白：18 页段 9-17 → [8,16]，补白 6 且只在末帖尾部", () => {
+    const result = impose(18, 32, LONG_EDGE, {
+      autoMode: true,
+      protectedSegments: [[9, 17]],
+    });
+    expect(result.auto_plan.capacities).toEqual([8, 16]);
+    expect(result.summary.blank_count).toBe(6);
+    expect(result.signatures[1].padding).toBe(6);
+    expect(auditResult(result).blanksOnlyInTail).toBe(true);
+  });
+
+  it("短边翻转在混合容量下逐帖生效", () => {
+    const result = impose(24, 32, SHORT_EDGE, {
+      autoMode: true,
+      protectedSegments: [[16, 17]],
+    });
+    const first = result.signatures[0].sheets[0];
+    expect(first.front).toEqual({ left: 8, right: 1 });
+    expect(first.back).toEqual({ left: 7, right: 2 });
+    const secondFirst = result.signatures[1].sheets[0];
+    // 16 页帖首纸：正 24|9，短边背 23|10
+    expect(secondFirst.front).toEqual({ left: 24, right: 9 });
+    expect(secondFirst.back).toEqual({ left: 23, right: 10 });
+  });
+
+  it("未启用自动模式时结构不含 auto 字段", () => {
+    const result = impose(24, 32, LONG_EDGE);
+    expect(result.auto_mode).toBeUndefined();
+    expect(result.auto_plan).toBeUndefined();
+    expect(result.signatures[0].padding).toBeUndefined();
+    expect(result.signatures[0].protected_segments).toBeUndefined();
+  });
+
+  it("自动模式无解时抛出中文错误", () => {
+    expect(() =>
+      impose(16, 8, LONG_EDGE, {
+        autoMode: true,
+        protectedSegments: [[5, 10]],
+      })
+    ).toThrow(/无解/);
   });
 });
