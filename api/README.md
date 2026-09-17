@@ -19,6 +19,8 @@
 | `pages_per_signature` | int | 每帖页数，只能为 **8 / 16 / 32** |
 | `flip` | string | **`long_edge`**（长边翻转）或 **`short_edge`**（短边翻转） |
 | `special_pages` | string，可选 | 特种纸页码范围：逗号分隔的单页 / 闭区间，如 **`3,5-8`**；留空或不传即全部普通纸 |
+| `auto_mode` | bool，可选 | **`true`** 时启用自动混合容量（`pages_per_signature` 作为容量上限）；缺省 / `false` 为固定模式 |
+| `protected_segments` | string，可选 | 不可拆页段：逗号分隔的单页 / 闭区间，如 **`9-16,20-22`**；仅 `auto_mode` 为 `true` 时生效 |
 
 ```bash
 curl -X POST http://localhost:8000/impose \
@@ -32,6 +34,19 @@ curl -X POST http://localhost:8000/impose \
 - 重复页先归一化（`1,1,2-3,2` 等价于 `1,2,3`）；
 - 格式错误、区间倒序（`5-3`）或页码超出 `1…total_pages` 时返回 422 字段错误；
 - 不传、传 `null` 或空白串时按原参数编排，响应保持原结构（无 `material_plan`）。
+
+`auto_mode` / `protected_segments` 规则：
+
+- `auto_mode` 只接受布尔值；未启用（缺省 / `false`）时 `protected_segments`
+  被忽略，请求与响应保持原结构（无 `auto_plan`）；
+- 自动模式把 `pages_per_signature` 视为**容量上限**，候选为不超过上限的
+  8 / 16 / 32；以正文顺序连续装入各帖（仅末帖补白），并按
+  **补白最少 → 书帖数最少 → 容量序列从前向后较大者优先** 选出唯一的逐帖容量序列；
+- 不可拆页段支持单页与闭区间混用，**重叠或相邻项先合并**；
+  任何书帖边界（页码 p 与 p+1 之间）都不得落在合并后页段内部；
+- 页段格式错误、区间倒序、越界、单段长度超过容量上限，
+  或全部候选容量组合均被页段阻断时，返回 422 与 `protected_segments` 字段错误；
+- 页段留空则不设约束，仍按自动模式规划容量。
 
 ### 成功响应 `200 OK`
 
@@ -132,6 +147,63 @@ curl -X POST http://localhost:8000/impose \
 }
 ```
 
+### 自动容量规划（仅当 `auto_mode` 为 `true`）
+
+自动模式下，每个书帖的 `capacity` 为规划选出的容量（不再全部等于
+`pages_per_signature`），`offset` 为此前书帖容量之和；每帖新增
+`blank_count`（该帖补白数）与 `protected_segments`（落在该帖内的不可拆
+页段，即约束命中），顶层新增 `auto_plan`：
+
+- `auto_plan.max_capacity` / `candidates`：容量上限与候选容量；
+- `auto_plan.capacities`：选出的逐帖容量序列；
+- `auto_plan.protected_segments`：归并后的不可拆页段（升序）。
+
+```bash
+curl -X POST http://localhost:8000/impose \
+  -H 'Content-Type: application/json' \
+  -d '{"total_pages": 24, "pages_per_signature": 32, "flip": "long_edge",
+       "auto_mode": true, "protected_segments": "16-24"}'
+```
+
+```json
+{
+  "total_pages": 24,
+  "pages_per_signature": 32,
+  "flip": "long_edge",
+  "signatures": [
+    {
+      "index": 0,
+      "offset": 0,
+      "capacity": 8,
+      "content_pages": 8,
+      "sheets": ["…"],
+      "blank_count": 0,
+      "protected_segments": []
+    },
+    {
+      "index": 1,
+      "offset": 8,
+      "capacity": 16,
+      "content_pages": 16,
+      "sheets": ["…"],
+      "blank_count": 0,
+      "protected_segments": [[16, 24]]
+    }
+  ],
+  "summary": { "signature_count": 2, "sheet_count": 6, "blank_count": 0 },
+  "auto_plan": {
+    "max_capacity": 32,
+    "candidates": [8, 16, 32],
+    "capacities": [8, 16],
+    "protected_segments": [[16, 24]]
+  }
+}
+```
+
+页段 `16-24` 禁止书帖边界落在 16…23：同为补白 0、两帖的 `[16, 8]` 被阻断，
+唯一方案变为 `[8, 16]`。材料计划（`special_pages`）可与自动模式同时使用，
+由同一结果计算。
+
 ### 字段错误 `422 Unprocessable Entity`
 
 任一输入为空、非整数（含字符串、浮点、布尔）、越界或取值不在允许集合内：
@@ -146,4 +218,5 @@ curl -X POST http://localhost:8000/impose \
 ```
 
 `fields` 的键为出错字段（`total_pages` / `pages_per_signature` / `flip` /
-`special_pages`），可一次返回多个字段错误；前端据此清除旧版面并逐字段提示。
+`special_pages` / `auto_mode` / `protected_segments`），可一次返回多个字段错误；
+前端据此清除旧版面并逐字段提示。

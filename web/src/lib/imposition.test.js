@@ -6,6 +6,7 @@ import {
   auditResult,
   flattenPlacedPages,
   impose,
+  planCapacities,
 } from "./imposition.js";
 
 describe("骑马订书帖编排（与 pytest 同一套规则）", () => {
@@ -86,4 +87,80 @@ describe("骑马订书帖编排（与 pytest 同一套规则）", () => {
       }
     }
   });
+});
+
+describe("自动混合容量 + 不可拆页段（与 pytest 同一套规则）", () => {
+  it("同成本候选决胜唯一：24 页上限 32 → 16 → 8", () => {
+    // 补白 0 且 2 帖的候选为 [8,16] 与 [16,8]，容量序列从前向后较大者优先
+    expect(planCapacities(24, 32, [])).toEqual([16, 8]);
+    expect(planCapacities(40, 32, [])).toEqual([32, 8]);
+    expect(planCapacities(33, 32, [])).toEqual([32, 8]);
+    expect(planCapacities(8, 32, [])).toEqual([8]);
+    expect(planCapacities(24, 8, [])).toEqual([8, 8, 8]);
+  });
+
+  it("受保护页段迫使容量次序改变：24 页 + 页段 16-24 → 8 → 16", () => {
+    expect(planCapacities(24, 32, [[16, 24]])).toEqual([8, 16]);
+  });
+
+  it("全部候选被页段阻断时返回 null", () => {
+    expect(planCapacities(16, 8, [[3, 10]])).toBeNull();
+  });
+
+  it("自动模式结果：逐帖容量与累计偏移驱动原页位公式", () => {
+    const result = impose(24, 32, LONG_EDGE, []);
+    expect(result.auto_plan.capacities).toEqual([16, 8]);
+    const [first, second] = result.signatures;
+    expect(first.capacity).toBe(16);
+    expect(first.offset).toBe(0);
+    expect(first.sheets[0].front).toEqual({ left: 16, right: 1 });
+    expect(first.sheets[0].back).toEqual({ left: 2, right: 15 });
+    expect(second.capacity).toBe(8);
+    expect(second.offset).toBe(16);
+    expect(second.sheets[0].front).toEqual({ left: 24, right: 17 });
+    expect(second.sheets[0].back).toEqual({ left: 18, right: 23 });
+    expect(first.blank_count).toBe(0);
+    expect(second.blank_count).toBe(0);
+    expect(result.summary.blank_count).toBe(0);
+    const audit = auditResult(result);
+    expect(audit.everyPageOnce).toBe(true);
+    expect(audit.blanksOnlyInTail).toBe(true);
+  });
+
+  it("约束命中逐帖标注：页段 16-24 落在第 2 帖", () => {
+    const result = impose(24, 32, LONG_EDGE, [[16, 24]]);
+    expect(result.auto_plan.capacities).toEqual([8, 16]);
+    expect(result.auto_plan.protected_segments).toEqual([[16, 24]]);
+    expect(result.signatures[0].protected_segments).toEqual([]);
+    expect(result.signatures[1].protected_segments).toEqual([[16, 24]]);
+    expect(auditResult(result).everyPageOnce).toBe(true);
+  });
+
+  it("末帖补白：33 页 → 32 → 8，补白 7 处只在末帖", () => {
+    const result = impose(33, 32, LONG_EDGE, []);
+    expect(result.auto_plan.capacities).toEqual([32, 8]);
+    expect(result.signatures[0].blank_count).toBe(0);
+    expect(result.signatures[1].blank_count).toBe(7);
+    expect(result.summary.blank_count).toBe(7);
+    const audit = auditResult(result);
+    expect(audit.everyPageOnce).toBe(true);
+    expect(audit.blanksOnlyInTail).toBe(true);
+  });
+
+  it.each([[1], [7], [24], [33], [2000]])(
+    "自动模式总页数 %s：每个正文页恰好出现一次",
+    (total) => {
+      for (const size of [8, 16, 32]) {
+        for (const flip of [LONG_EDGE, SHORT_EDGE]) {
+          const result = impose(total, size, flip, []);
+          const audit = auditResult(result);
+          expect(audit.everyPageOnce).toBe(true);
+          expect(audit.blanksOnlyInTail).toBe(true);
+          expect(audit.blankCount).toBe(
+            result.auto_plan.capacities.reduce((sum, c) => sum + c, 0) - total
+          );
+        }
+      }
+    }
+  );
 });

@@ -1,13 +1,33 @@
 import { expect, test } from "@playwright/test";
 
-async function submitForm(page, { total, size = "8", flip = "long_edge", special }) {
+async function submitForm(
+  page,
+  { total, size = "8", flip = "long_edge", special, auto, segments }
+) {
   await page.getByTestId("input-total-pages").fill(total);
   await page.getByTestId("select-size").selectOption(size);
   await page.getByTestId("select-flip").selectOption(flip);
   if (special !== undefined) {
     await page.getByTestId("input-special-pages").fill(special);
   }
+  if (auto) {
+    await page.getByTestId("toggle-auto").check();
+    if (segments !== undefined) {
+      await page.getByTestId("input-protected-segments").fill(segments);
+    }
+  }
   await page.getByTestId("submit-btn").click();
+}
+
+async function downloadJson(page) {
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByTestId("download-json").click(),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return { download, json: JSON.parse(Buffer.concat(chunks).toString("utf-8")) };
 }
 
 test.describe("骑马订书帖编排页面", () => {
@@ -93,17 +113,10 @@ test.describe("骑马订书帖编排页面", () => {
 
   test("下载按钮导出与页面同内容的 JSON 文件", async ({ page }) => {
     await submitForm(page, { total: "12", size: "16", flip: "long_edge" });
-    const [download] = await Promise.all([
-      page.waitForEvent("download"),
-      page.getByTestId("download-json").click(),
-    ]);
+    const { download, json } = await downloadJson(page);
     expect(download.suggestedFilename()).toMatch(
       /^imposition-12p-16-long_edge\.json$/
     );
-    const stream = await download.createReadStream();
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    const json = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
     expect(json.total_pages).toBe(12);
     expect(json.pages_per_signature).toBe(16);
     expect(json.signatures).toHaveLength(1);
@@ -140,14 +153,7 @@ test.describe("骑马订书帖编排页面", () => {
     await expect(materials.nth(1)).toHaveText("普通纸");
     await expect(materials.nth(1)).toHaveAttribute("data-material", "normal");
 
-    const [download] = await Promise.all([
-      page.waitForEvent("download"),
-      page.getByTestId("download-json").click(),
-    ]);
-    const stream = await download.createReadStream();
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    const json = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+    const { json } = await downloadJson(page);
     expect(json.material_plan.special_pages).toEqual([1, 2, 7, 8]);
     expect(json.material_plan.special_sheet_count).toBe(1);
     expect(json.material_plan.mixed_sheet_count).toBe(0);
@@ -217,5 +223,181 @@ test.describe("骑马订书帖编排页面", () => {
     // 改回合法范围后结果恢复
     await submitForm(page, { total: "8", special: "1,2,7-8" });
     await expect(page.getByTestId("material-plan")).toBeVisible();
+  });
+});
+
+test.describe("自动混合容量 + 不可拆页段", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+  });
+
+  test("未启用自动模式：不出现自动规划信息", async ({ page }) => {
+    await submitForm(page, { total: "24", size: "32" });
+    await expect(page.getByTestId("result-panel")).toBeVisible();
+    await expect(page.getByTestId("auto-plan")).toHaveCount(0);
+    await expect(page.getByTestId("sig-blanks")).toHaveCount(0);
+    await expect(page.getByTestId("sig-protected")).toHaveCount(0);
+    await expect(page.getByTestId("summary-mode")).toContainText("每帖 32 页");
+  });
+
+  test("同成本候选决胜唯一：24 页上限 32 → 16 → 8，补白 0", async ({ page }) => {
+    await submitForm(page, { total: "24", size: "32", auto: true });
+
+    await expect(page.getByTestId("result-panel")).toBeVisible();
+    await expect(page.getByTestId("auto-plan")).toBeVisible();
+    await expect(page.getByTestId("plan-capacities")).toContainText("16 → 8");
+    await expect(page.getByTestId("plan-segments")).toContainText("无");
+    await expect(page.getByTestId("summary-mode")).toContainText(
+      "容量上限 32 页"
+    );
+
+    const cards = page.getByTestId("signature-card");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.nth(0)).toContainText("容量 16");
+    await expect(cards.nth(1)).toContainText("容量 8");
+    await expect(cards.nth(0).getByTestId("sig-blanks")).toContainText(
+      "补白 0 处"
+    );
+    await expect(cards.nth(1).getByTestId("sig-blanks")).toContainText(
+      "补白 0 处"
+    );
+    await expect(page.getByTestId("summary-blanks")).toContainText("0 处");
+
+    // 页码唯一性自检全部通过
+    await expect(page.locator(".check.bad")).toHaveCount(0);
+
+    // 下载 JSON 与当前画面一致
+    const { download, json } = await downloadJson(page);
+    expect(download.suggestedFilename()).toMatch(
+      /^imposition-24p-auto32-long_edge\.json$/
+    );
+    expect(json.auto_plan.capacities).toEqual([16, 8]);
+    expect(json.signatures[0].capacity).toBe(16);
+    expect(json.signatures[1].capacity).toBe(8);
+    expect(json.summary.blank_count).toBe(0);
+  });
+
+  test("受保护页段迫使容量次序改变：24 页 + 页段 16-24 → 8 → 16", async ({
+    page,
+  }) => {
+    await submitForm(page, {
+      total: "24",
+      size: "32",
+      auto: true,
+      segments: "16-24",
+    });
+
+    await expect(page.getByTestId("plan-capacities")).toContainText("8 → 16");
+    await expect(page.getByTestId("plan-segments")).toContainText("16-24");
+
+    const cards = page.getByTestId("signature-card");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.nth(0)).toContainText("容量 8");
+    await expect(cards.nth(1)).toContainText("容量 16");
+    // 约束命中情况逐帖标注：页段落在第 2 帖
+    await expect(cards.nth(0).getByTestId("sig-protected")).toHaveCount(0);
+    await expect(cards.nth(1).getByTestId("sig-protected")).toContainText(
+      "16-24"
+    );
+    await expect(page.locator(".check.bad")).toHaveCount(0);
+
+    const { json } = await downloadJson(page);
+    expect(json.auto_plan.capacities).toEqual([8, 16]);
+    expect(json.auto_plan.protected_segments).toEqual([[16, 24]]);
+    expect(json.signatures[1].protected_segments).toEqual([[16, 24]]);
+  });
+
+  test("末帖补白：33 页 → 32 → 8，补白 7 处只在末帖", async ({ page }) => {
+    await submitForm(page, { total: "33", size: "32", auto: true });
+
+    await expect(page.getByTestId("plan-capacities")).toContainText("32 → 8");
+    const cards = page.getByTestId("signature-card");
+    await expect(cards.nth(0).getByTestId("sig-blanks")).toContainText(
+      "补白 0 处"
+    );
+    await expect(cards.nth(1).getByTestId("sig-blanks")).toContainText(
+      "补白 7 处"
+    );
+    await expect(cards.nth(0).locator(".blank")).toHaveCount(0);
+    await expect(cards.nth(1).locator(".blank")).toHaveCount(7);
+    await expect(page.getByTestId("summary-blanks")).toContainText("7 处");
+    await expect(page.locator(".check.bad")).toHaveCount(0);
+  });
+
+  test("自动模式下材料计划照常计算", async ({ page }) => {
+    await submitForm(page, {
+      total: "24",
+      size: "32",
+      auto: true,
+      special: "1,2,15-16",
+    });
+
+    await expect(page.getByTestId("auto-plan")).toBeVisible();
+    await expect(page.getByTestId("material-plan")).toBeVisible();
+    await expect(page.getByTestId("summary-special-sheets")).toContainText(
+      "1 张"
+    );
+    await expect(page.getByTestId("summary-mixed-sheets")).toContainText(
+      "0 张"
+    );
+    await expect(page.getByTestId("no-conflict")).toBeVisible();
+
+    const { json } = await downloadJson(page);
+    expect(json.auto_plan.capacities).toEqual([16, 8]);
+    expect(json.material_plan.special_sheet_count).toBe(1);
+    expect(json.signatures[0].sheets[0].material).toBe("special");
+  });
+
+  test("非法或无解页段：字段报中文错误并清除旧结果", async ({ page }) => {
+    await submitForm(page, { total: "24", size: "32", auto: true });
+    await expect(page.getByTestId("auto-plan")).toBeVisible();
+
+    // 倒序区间
+    await submitForm(page, {
+      total: "24",
+      size: "32",
+      auto: true,
+      segments: "20-16",
+    });
+    await expect(page.getByTestId("result-panel")).not.toBeAttached();
+    await expect(page.locator(".field-error").first()).toContainText("倒序");
+
+    // 超出正文页数
+    await submitForm(page, {
+      total: "24",
+      size: "32",
+      auto: true,
+      segments: "9-40",
+    });
+    await expect(page.getByTestId("result-panel")).not.toBeAttached();
+    await expect(page.locator(".field-error").first()).toContainText(
+      "1 至 24"
+    );
+
+    // 单段长度超过容量上限
+    await submitForm(page, {
+      total: "24",
+      size: "16",
+      auto: true,
+      segments: "1-20",
+    });
+    await expect(page.getByTestId("result-panel")).not.toBeAttached();
+    await expect(page.locator(".field-error").first()).toContainText(
+      "容量上限"
+    );
+
+    // 全部候选均被约束阻断
+    await submitForm(page, {
+      total: "16",
+      size: "8",
+      auto: true,
+      segments: "3-10",
+    });
+    await expect(page.getByTestId("result-panel")).not.toBeAttached();
+    await expect(page.locator(".field-error").first()).toContainText("阻断");
+
+    // 改回合法输入后结果恢复
+    await submitForm(page, { total: "24", size: "32", auto: true });
+    await expect(page.getByTestId("auto-plan")).toBeVisible();
   });
 });

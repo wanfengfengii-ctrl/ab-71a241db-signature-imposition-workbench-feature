@@ -7,7 +7,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from .imposition import impose
-from .validation import parse_special_pages, validate_imposition_request
+from .validation import (
+    parse_protected_segments,
+    parse_special_pages,
+    validate_imposition_request,
+)
 
 app = FastAPI(title="骑马订书帖编排 API", version="1.0.0")
 
@@ -20,6 +24,8 @@ class ImposeRequest(BaseModel):
     pages_per_signature: Any = None
     flip: Any = None
     special_pages: Any = None
+    auto_mode: Any = None
+    protected_segments: Any = None
 
 
 @app.get("/health")
@@ -43,9 +49,22 @@ def impose_endpoint(request: ImposeRequest) -> Any:
         special_pages, _ = parse_special_pages(
             raw_special, values["total_pages"]
         )
+    # 自动混合容量：仅 auto_mode 为 true 时启用；不可拆页段留空则不设约束。
+    # 未启用时 protected_segments 被忽略，请求 / 响应保持兼容。
+    protected_segments = None
+    if values.get("auto_mode") is True:
+        protected_segments = []
+        raw_segments = values.get("protected_segments")
+        if isinstance(raw_segments, str) and raw_segments.strip():
+            protected_segments, _ = parse_protected_segments(
+                raw_segments,
+                values["total_pages"],
+                values["pages_per_signature"],
+            )
     return impose(
         total_pages=values["total_pages"],
         pages_per_signature=values["pages_per_signature"],
         flip=values["flip"],
         special_pages=special_pages,
+        protected_segments=protected_segments,
     )

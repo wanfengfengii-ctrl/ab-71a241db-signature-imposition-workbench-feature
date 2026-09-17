@@ -90,7 +90,11 @@ function SheetRow({ sheet, showMaterial, specialPages }) {
   );
 }
 
-function SignatureCard({ signature, flip, materialPlan }) {
+function formatSegment([start, end]) {
+  return start === end ? `${start}` : `${start}-${end}`;
+}
+
+function SignatureCard({ signature, flip, materialPlan, autoMode }) {
   const showMaterial = Boolean(materialPlan);
   const specialPages = useMemo(
     () => new Set(materialPlan?.special_pages ?? []),
@@ -100,6 +104,7 @@ function SignatureCard({ signature, flip, materialPlan }) {
     materialPlan?.conflicts.some(
       (conflict) => conflict.signature_index === signature.index
     ) ?? false;
+  const protectedHits = autoMode ? signature.protected_segments ?? [] : [];
   return (
     <section
       className={`signature-card ${hasConflict ? "has-conflict" : ""}`}
@@ -111,6 +116,16 @@ function SignatureCard({ signature, flip, materialPlan }) {
           （含正文 {signature.content_pages} 页 / 容量 {signature.capacity}
           ，帖偏移 {signature.offset}）
         </span>
+        {autoMode && (
+          <span className="sig-blanks" data-testid="sig-blanks">
+            补白 {signature.blank_count} 处
+          </span>
+        )}
+        {protectedHits.length > 0 && (
+          <span className="protected-flag" data-testid="sig-protected">
+            含不可拆页段 {protectedHits.map(formatSegment).join("、")}
+          </span>
+        )}
         {hasConflict && <span className="conflict-flag">含混纸冲突</span>}
       </h3>
       <table className="sheets-table">
@@ -214,11 +229,43 @@ function MaterialPlanPanel({ plan }) {
   );
 }
 
+function AutoPlanPanel({ plan }) {
+  return (
+    <section className="auto-plan" data-testid="auto-plan">
+      <h3>自动容量规划</h3>
+      <ul className="material-summary">
+        <li data-testid="plan-capacities">
+          逐帖容量：<strong>{plan.capacities.join(" → ")}</strong>
+        </li>
+        <li data-testid="plan-candidates">
+          候选容量：
+          <strong>{plan.candidates.join(" / ")}</strong>
+          （上限 {plan.max_capacity}）
+        </li>
+        <li data-testid="plan-segments">
+          不可拆页段：
+          <strong>
+            {plan.protected_segments.length > 0
+              ? plan.protected_segments.map(formatSegment).join("、")
+              : "无"}
+          </strong>
+        </li>
+      </ul>
+      <p className="plan-rule">
+        规划目标：补白最少 → 书帖数最少 →
+        容量序列从前向后较大者优先；书帖边界不落入任何不可拆页段。
+      </p>
+    </section>
+  );
+}
+
 export default function App() {
   const [totalPagesInput, setTotalPagesInput] = useState("");
   const [pagesPerSignature, setPagesPerSignature] = useState(8);
   const [flip, setFlip] = useState("long_edge");
   const [specialPagesInput, setSpecialPagesInput] = useState("");
+  const [autoMode, setAutoMode] = useState(false);
+  const [protectedSegmentsInput, setProtectedSegmentsInput] = useState("");
   const [fieldErrors, setFieldErrors] = useState({});
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -236,11 +283,15 @@ export default function App() {
       const totalPages = trimmed === "" ? null : Number(trimmed);
       // 特种纸范围留空时不带该字段，按原参数调用
       const specialTrimmed = specialPagesInput.trim();
+      // 不可拆页段仅在自动模式下发送；未启用自动模式时请求保持原结构
+      const segmentsTrimmed = protectedSegmentsInput.trim();
       const response = await requestImposition({
         totalPages,
         pagesPerSignature,
         flip,
         specialPages: specialTrimmed === "" ? null : specialTrimmed,
+        autoMode,
+        protectedSegments: segmentsTrimmed === "" ? null : segmentsTrimmed,
       });
       if (!response.ok) {
         // 任一输入为空/非整数/越界/不在集合内：清除旧版面并显示字段错误
@@ -276,6 +327,8 @@ export default function App() {
         输入正文总页数、每帖页数与翻转方式，系统按每帖独立补白、逐纸落位，
         帮你避免倒页、重页、漏页。可另填特种纸页码范围（如 3,5-8），
         直接看出哪些纸张可换料、哪些因混纸无法按当前编排生产。
+        折页或连版插图不能跨书帖时，可开启自动混合容量：以所选每帖页数为
+        容量上限，自动混合 8/16/32 页容量，并录入不可拆页段。
       </p>
 
       <form className="controls" onSubmit={handleSubmit} noValidate>
@@ -344,6 +397,37 @@ export default function App() {
           <FieldError>{fieldErrors.special_pages}</FieldError>
         </div>
 
+        <div className="field field-auto">
+          <label className="checkbox-label" htmlFor="autoMode">
+            <input
+              id="autoMode"
+              type="checkbox"
+              checked={autoMode}
+              onChange={(event) => setAutoMode(event.target.checked)}
+              data-testid="toggle-auto"
+            />
+            自动混合 8/16/32 页容量（以每帖页数为上限）
+          </label>
+          <FieldError>{fieldErrors.auto_mode}</FieldError>
+        </div>
+
+        {autoMode && (
+          <div className="field">
+            <label htmlFor="protectedSegments">不可拆页段（可选）</label>
+            <input
+              id="protectedSegments"
+              type="text"
+              autoComplete="off"
+              value={protectedSegmentsInput}
+              onChange={(event) => setProtectedSegmentsInput(event.target.value)}
+              placeholder="如 9-16,20-22；留空则不设约束"
+              aria-invalid={Boolean(fieldErrors.protected_segments)}
+              data-testid="input-protected-segments"
+            />
+            <FieldError>{fieldErrors.protected_segments}</FieldError>
+          </div>
+        )}
+
         <button type="submit" disabled={loading} data-testid="submit-btn">
           {loading ? "编排中…" : "生成书帖"}
         </button>
@@ -373,8 +457,17 @@ export default function App() {
             <li>
               正文 <strong>{result.total_pages}</strong> 页
             </li>
-            <li>
-              每帖 <strong>{result.pages_per_signature}</strong> 页
+            <li data-testid="summary-mode">
+              {result.auto_plan ? (
+                <>
+                  容量上限 <strong>{result.pages_per_signature}</strong> 页 ·
+                  自动混合容量
+                </>
+              ) : (
+                <>
+                  每帖 <strong>{result.pages_per_signature}</strong> 页
+                </>
+              )}
             </li>
             <li data-testid="summary-signatures">
               共 <strong>{result.summary.signature_count}</strong> 帖 /{" "}
@@ -390,6 +483,8 @@ export default function App() {
               </strong>
             </li>
           </ul>
+
+          {result.auto_plan && <AutoPlanPanel plan={result.auto_plan} />}
 
           <section className="audit" data-testid="audit">
             <h3>印前自检</h3>
@@ -417,6 +512,7 @@ export default function App() {
                 signature={signature}
                 flip={result.flip}
                 materialPlan={result.material_plan ?? null}
+                autoMode={Boolean(result.auto_plan)}
               />
             ))}
           </div>
