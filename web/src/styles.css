@@ -1,0 +1,358 @@
+:root {
+  --ink: #1f2933;
+  --muted: #5b6770;
+  --line: #d6dde3;
+  --accent: #1d5fd1;
+  --accent-dark: #174aa6;
+  --bg: #f4f6f8;
+  --card: #ffffff;
+  --blank-bg: #f0e9d8;
+  --blank-ink: #8a6d1f;
+  --bad: #c0392b;
+  --good: #1e7a46;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC",
+    system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 32px 24px 80px;
+}
+
+h1 {
+  margin: 0 0 8px;
+}
+
+.intro {
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.field label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 15px;
+  background: #fff;
+}
+
+.field input[aria-invalid="true"],
+.field select[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+
+.field-error {
+  margin: 0;
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.fatal-error {
+  color: var(--bad);
+  background: #fdecea;
+  border: 1px solid #f5c6c0;
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+
+button {
+  height: 40px;
+  margin-top: 22px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent-dark);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.secondary {
+  margin-top: 0;
+  background: #fff;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.result {
+  margin-top: 28px;
+}
+
+.result-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  list-style: none;
+  margin: 12px 0 20px;
+  padding: 14px 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.audit {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 18px 14px;
+  margin-bottom: 24px;
+}
+
+.audit h3 {
+  margin: 12px 0 6px;
+}
+
+.check {
+  margin: 6px 0;
+}
+
+.check.ok {
+  color: var(--good);
+}
+
+.check.bad {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.signatures {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.signature-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px 20px;
+  overflow-x: auto;
+}
+
+.signature-card h3 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+
+.sig-meta {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.sheets-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 520px;
+}
+
+.sheets-table th,
+.sheets-table td {
+  border: 1px solid var(--line);
+  text-align: center;
+  padding: 0;
+}
+
+.sheets-table thead th {
+  background: #eef2f7;
+  font-size: 13px;
+  padding: 6px 4px;
+  font-weight: 600;
+}
+
+.sheet-label {
+  background: #f7f9fb;
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  padding: 0 10px;
+}
+
+.page-cell {
+  width: 88px;
+  height: 52px;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.page-cell.is-blank {
+  background: var(--blank-bg);
+}
+
+.blank {
+  color: var(--blank-ink);
+  font-size: 13px;
+  letter-spacing: 2px;
+}
+
+/* 材料计划 */
+.material-plan {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 18px 14px;
+  margin-bottom: 24px;
+}
+
+.material-plan.has-conflict {
+  border-color: var(--bad);
+}
+
+.material-plan h3 {
+  margin: 12px 0 6px;
+}
+
+.material-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+
+.conflicts {
+  background: #fdecea;
+  border: 1px solid #f5c6c0;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.conflict-title {
+  margin: 0 0 6px;
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.conflicts ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.conflict-item {
+  margin: 4px 0;
+}
+
+.conflict-item .special-pages {
+  color: var(--accent-dark);
+}
+
+.conflict-item .normal-pages {
+  color: var(--ink);
+}
+
+/* 纸张材料标记 */
+tr.is-special .sheet-label {
+  background: #e3f0e7;
+}
+
+tr.is-mixed .sheet-label {
+  background: #fdecea;
+  color: var(--bad);
+}
+
+tr.is-mixed .page-cell {
+  border-color: #e5a49d;
+}
+
+.material-cell {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 0 10px;
+}
+
+.material-cell.material-special {
+  color: var(--good);
+  background: #e3f0e7;
+}
+
+.material-cell.material-mixed {
+  color: var(--bad);
+  background: #fdecea;
+}
+
+.material-cell.material-normal {
+  color: var(--muted);
+}
+
+/* 混纸冲突行内的两类页码 */
+.page-cell.is-special-page {
+  background: #dce8f8;
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.page-cell.is-normal-page {
+  background: #fdecea;
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.signature-card.has-conflict {
+  border-color: var(--bad);
+}
+
+.conflict-flag {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 4px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
